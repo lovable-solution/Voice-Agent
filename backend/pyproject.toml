@@ -1,0 +1,27 @@
+[project]
+name = "client-meeting-simulator-backend"
+version = "1.0.0"
+description = "FastAPI backend for a voice client-meeting simulator powered by Claude"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=2.8,<3",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-multipart>=0.0.9",
+    "pypdf>=4.2",
+    "python-docx>=1.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
