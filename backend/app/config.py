@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     # (server-side `fallbacks: "default"`).
     enable_refusal_fallbacks: bool = True
 
+    # Speech-to-text for the participant. With a Deepgram key their speech is transcribed by
+    # Deepgram Flux, which also decides when they've finished a turn; without one the browser's
+    # own speech recognition is used.
+    deepgram_api_key: str | None = None
+    deepgram_model: str = "flux-general-en"
+    deepgram_url: str = "wss://api.deepgram.com/v2/listen"
+
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",

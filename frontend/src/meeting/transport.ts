@@ -26,9 +26,18 @@ export const CLOSE_CODES = {
 const TERMINAL = new Set<number>(Object.values(CLOSE_CODES))
 const MAX_RECONNECTS = 6
 
-export function meetingSocketUrl(sessionId: string, location: Location = window.location): string {
+function sessionSocketUrl(sessionId: string, endpoint: string, location: Location): string {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${location.host}/api/sessions/${encodeURIComponent(sessionId)}/ws`
+  return `${protocol}//${location.host}/api/sessions/${encodeURIComponent(sessionId)}/${endpoint}`
+}
+
+export function meetingSocketUrl(sessionId: string, location: Location = window.location): string {
+  return sessionSocketUrl(sessionId, 'ws', location)
+}
+
+/** The microphone stream for speech recognition by Deepgram (backend/app/speech.py). */
+export function speechSocketUrl(sessionId: string, location: Location = window.location): string {
+  return sessionSocketUrl(sessionId, 'speech', location)
 }
 
 export class WebSocketTransport implements MeetingTransport {

@@ -68,7 +68,7 @@ class _ClientGone(Exception):
     """The socket closed while we were sending."""
 
 
-def _origin_allowed(websocket: WebSocket) -> bool:
+def origin_allowed(websocket: WebSocket) -> bool:
     """Reject cross-site WebSocket hijacking: only our own pages may connect."""
     origin = websocket.headers.get("origin")
     if not origin:
@@ -80,7 +80,7 @@ def _origin_allowed(websocket: WebSocket) -> bool:
 
 @router.websocket("/api/sessions/{session_id}/ws")
 async def meeting_socket(websocket: WebSocket, session_id: str) -> None:
-    if not _origin_allowed(websocket):
+    if not origin_allowed(websocket):
         await websocket.close(code=CLOSE_FORBIDDEN_ORIGIN)
         return
     session: Session | None = websocket.app.state.store.get(session_id)
@@ -129,8 +129,8 @@ class MeetingConnection:
             self._closed = True
             try:
                 await self.ws.close(code=code, reason=reason)
-            except RuntimeError:
-                pass  # already closing
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                pass  # already closing, or the browser is gone
 
     # ------------------------------------------------------------------ sending
 

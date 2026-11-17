@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { Recognizer, RecognizerEvents } from '../speech/recognizer'
 import type { SpeakItem, Synthesizer, SynthesizerEvents } from '../speech/synthesizer'
 import type { ClientEvent, ServerEvent, SessionOut } from '../types'
-import { MeetingController, type Timers } from './controller'
+import { FINAL_RESULT_WAIT_MS, MeetingController, type Timers } from './controller'
 import type { ConnectionState, MeetingTransport, TransportEvents } from './transport'
 
 // ------------------------------------------------------------------ fakes
@@ -75,11 +75,19 @@ class FakeSynth implements Synthesizer {
 
 class FakeRecognizer implements Recognizer {
   supported = true
+  detectsTurnEnd = false
   lang = 'en-US'
   running = false
+  prepared = false
+  disposed = false
+  endOfTurnMs: number | null = null
   events!: RecognizerEvents
   setEvents(events: RecognizerEvents) {
     this.events = events
+  }
+  finalizeCalls = 0
+  prepare() {
+    this.prepared = true
   }
   start() {
     this.running = true
@@ -87,8 +95,30 @@ class FakeRecognizer implements Recognizer {
   stop() {
     this.running = false
   }
+  finalize() {
+    this.finalizeCalls++
+  }
+  setEndOfTurnMs(ms: number) {
+    this.endOfTurnMs = ms
+  }
+  dispose() {
+    this.running = false
+    this.disposed = true
+  }
   hear(finalText: string, interimText = '') {
     this.events.onResult(finalText, interimText)
+  }
+}
+
+/** Like Deepgram Flux: transcripts cover the whole turn so far, and it says when the turn ends. */
+class FakeTurnRecognizer extends FakeRecognizer {
+  detectsTurnEnd = true
+  /** The turn so far. */
+  update(transcript: string) {
+    this.events.onResult('', transcript)
+  }
+  endTurn(transcript: string) {
+    this.events.onTurnEnd(transcript)
   }
 }
 
@@ -137,9 +167,11 @@ function session(overrides: Partial<SessionOut> = {}): SessionOut {
       questions_to_ask: [],
       agenda: [],
       opening_line: 'Hi Alex.',
+      speech_keyterms: [],
     },
     materials: [],
     messages: [],
+    speech_engine: 'browser',
     ...overrides,
   }
 }
@@ -150,10 +182,10 @@ let recognizer: FakeRecognizer
 let timers: FakeTimers
 let meeting: MeetingController
 
-function setup(options: { bargeIn?: boolean } = {}, base = session()) {
+function setup(options: { bargeIn?: boolean; endOfTurnMs?: number } = {}, base = session(), rec = new FakeRecognizer()) {
   transport = new FakeTransport()
   synth = new FakeSynth()
-  recognizer = new FakeRecognizer()
+  recognizer = rec
   timers = new FakeTimers()
   meeting = new MeetingController({ session: base, transport, synthesizer: synth, recognizer, timers, options })
   meeting.join()
@@ -225,12 +257,13 @@ describe('MeetingController', () => {
     recognizer.hear('I have built three dashboards.', '')
     timers.advance(1100)
     expect(transport.types()).toEqual(['start']) // still inside the pause window
-    recognizer.hear('', 'like this')
+    recognizer.hear('Like this one.', '')
     timers.advance(1200)
 
+    expect(recognizer.finalizeCalls).toBe(0) // everything was final already: no extra wait
     expect(transport.sent.at(-1)).toEqual({
       type: 'user_message',
-      text: 'I have built three dashboards. like this',
+      text: 'I have built three dashboards. Like this one.',
       source: 'speech',
     })
     expect(snap().phase).toBe('client_thinking')
@@ -337,7 +370,48 @@ describe('MeetingController', () => {
     expect(transport.sent.at(-1)).toEqual({ type: 'interrupt', message_id: 'm2', spoken_text: 'Let me' })
     expect(snap().phase).toBe('you_speaking')
     timers.advance(1200)
-    expect(transport.sent.at(-1)).toEqual({ type: 'user_message', text: 'um actually wait', source: 'speech' })
+    recognizer.hear('Um, actually, wait.', '')
+    expect(transport.sent.at(-1)).toEqual({ type: 'user_message', text: 'Um, actually, wait.', source: 'speech' })
+  })
+
+  it('waits for the final result when the pause ends on an interim guess', () => {
+    startMeeting()
+    recognizer.hear('', 'we could start in much')
+    timers.advance(1200)
+
+    // The pause is over, but the words are still a guess: ask for the final result first.
+    expect(recognizer.finalizeCalls).toBe(1)
+    expect(recognizer.running).toBe(true) // not stopped: that would discard the final result
+    expect(transport.types()).toEqual(['start'])
+
+    recognizer.hear('We could start in March.', '')
+    expect(transport.sent.at(-1)).toEqual({ type: 'user_message', text: 'We could start in March.', source: 'speech' })
+    expect(snap().transcript.at(-1)).toMatchObject({ speaker: 'you', text: 'We could start in March.' })
+  })
+
+  it('sends the interim guess if the final result never arrives', () => {
+    startMeeting()
+    recognizer.hear('', 'we could start in March')
+    timers.advance(1200 + FINAL_RESULT_WAIT_MS - 1)
+    expect(transport.types()).toEqual(['start'])
+
+    timers.advance(1)
+    expect(transport.sent.at(-1)).toEqual({ type: 'user_message', text: 'we could start in March', source: 'speech' })
+  })
+
+  it('keeps the turn open if the participant goes on talking while the final result is pending', () => {
+    startMeeting()
+    recognizer.hear('', 'we could start')
+    timers.advance(1200)
+    expect(recognizer.finalizeCalls).toBe(1)
+
+    recognizer.hear('', 'we could start in March') // more words: the pause starts over
+    timers.advance(FINAL_RESULT_WAIT_MS)
+    expect(transport.types()).toEqual(['start'])
+
+    recognizer.hear('We could start in March.', '')
+    timers.advance(1200)
+    expect(transport.sent.at(-1)).toEqual({ type: 'user_message', text: 'We could start in March.', source: 'speech' })
   })
 
   it('removes a reply that failed before saying anything', () => {
@@ -423,7 +497,91 @@ describe('MeetingController', () => {
     expect(transport.sent.at(-1)).toMatchObject({ type: 'interrupt', message_id: 'm2' })
     expect(transport.closed).toBe(true)
     expect(recognizer.running).toBe(false)
+    expect(recognizer.disposed).toBe(true)
     expect(snap().phase).toBe('ended')
     expect(snap().endedAt).not.toBeNull()
+  })
+})
+
+describe('MeetingController with a recognizer that detects the end of a turn (Deepgram)', () => {
+  let turns: FakeTurnRecognizer
+
+  function setupTurns(options: { bargeIn?: boolean } = {}) {
+    turns = new FakeTurnRecognizer()
+    setup(options, session({ speech_engine: 'deepgram' }), turns)
+  }
+
+  beforeEach(() => setupTurns())
+
+  it('gets the recognizer ready on joining and keeps it tuned to the pause setting', () => {
+    expect(turns.prepared).toBe(true)
+    expect(turns.endOfTurnMs).toBe(1200)
+    meeting.updateOptions({ endOfTurnMs: 2500 })
+    expect(turns.endOfTurnMs).toBe(2500)
+  })
+
+  it('sends the turn when the recognizer says it is over, however long the pauses in it', () => {
+    startMeeting()
+    turns.update('I am')
+    expect(snap().phase).toBe('you_speaking')
+    // Everything but the still-settling last word shows as recognized.
+    expect(snap().caption).toEqual({ speaker: 'you', text: 'I am', spokenChars: 2 })
+
+    timers.advance(10_000) // thinking mid-sentence doesn't end the turn
+    expect(transport.types()).toEqual(['start'])
+
+    turns.update('I am Ross, and I build data pipelines')
+    turns.endTurn('I am Ross, and I build data pipelines.')
+    expect(transport.sent.at(-1)).toEqual({
+      type: 'user_message',
+      text: 'I am Ross, and I build data pipelines.',
+      source: 'speech',
+    })
+    expect(snap().phase).toBe('client_thinking')
+    expect(turns.running).toBe(false) // not listening over the client's answer
+  })
+
+  it('with headphones, a lone "mm-hm" over the client is ignored but a real interruption is not', () => {
+    setupTurns({ bargeIn: true })
+    startMeeting()
+    turns.endTurn('Hi.')
+    ack('Hi.')
+    reply('m2', 'Let me explain the whole scope in detail. First', { end: false })
+    synth.progress(6)
+
+    turns.update('Mm-hmm.')
+    turns.endTurn('Mm-hmm.')
+    expect(snap().phase).toBe('client_speaking')
+    expect(transport.types().filter((type) => type === 'user_message')).toHaveLength(1)
+
+    turns.update('Sorry, quick')
+    expect(transport.sent.at(-1)).toEqual({ type: 'interrupt', message_id: 'm2', spoken_text: 'Let me' })
+    turns.endTurn('Sorry, quick question about the budget.')
+    expect(transport.sent.at(-1)).toEqual({
+      type: 'user_message',
+      text: 'Sorry, quick question about the budget.',
+      source: 'speech',
+    })
+  })
+
+  it('muting mid-turn sends what was said, and ignores the rest of that turn', () => {
+    startMeeting()
+    turns.update('We could start in')
+    meeting.setMic(false)
+    expect(transport.sent.at(-1)).toEqual({ type: 'user_message', text: 'We could start in', source: 'speech' })
+    turns.endTurn('We could start in March.')
+    expect(transport.types().filter((type) => type === 'user_message')).toHaveLength(1)
+  })
+
+  it('a recognizer that stops working for good switches the meeting to typing', () => {
+    startMeeting()
+    turns.update('We could')
+    turns.events.onError('unavailable', 'Deepgram rejected the API key. Check DEEPGRAM_API_KEY in backend/.env.')
+    expect(snap().micBlocked).toBe('Deepgram rejected the API key. Check DEEPGRAM_API_KEY in backend/.env.')
+    expect(snap().micOn).toBe(false)
+    expect(transport.sent.at(-1)).toEqual({ type: 'user_message', text: 'We could', source: 'speech' }) // nothing lost
+
+    turns.events.onError('service', 'Lost the connection for speech recognition. Reconnecting…')
+    expect(snap().notice).toMatchObject({ tone: 'error', text: 'Lost the connection for speech recognition. Reconnecting…' })
   })
 })

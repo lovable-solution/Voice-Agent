@@ -13,6 +13,8 @@ MAX_UTTERANCE_CHARS = 4_000
 MaterialKind = Literal["job_posting", "partnership", "notes"]
 Personality = Literal["friendly", "neutral", "skeptical", "demanding"]
 MessageKind = Literal["speech", "typed", "event", "material", "reply"]
+# Who transcribes the participant: Deepgram (relayed by the server) or the browser itself.
+SpeechEngine = Literal["deepgram", "browser"]
 
 KIND_LABELS: dict[str, str] = {
     "job_posting": "Job posting",
@@ -112,6 +114,14 @@ class Briefing(BaseModel):
             "that sets up the meeting. One or two spoken sentences, plain text."
         )
     )
+    speech_keyterms: list[str] = Field(
+        description=(
+            "Up to 40 words and short phrases the participant is likely to say aloud in this meeting that a speech "
+            "recognizer could mishear: names of people, companies, products, and places, plus technical terms and "
+            "acronyms from the material (for example 'SQL Server', 'SSIS', 'Shopify'). Spell each exactly as it "
+            "is written, one term per item."
+        )
+    )
 
 
 # --------------------------------------------------------------------------- sessions
@@ -148,6 +158,7 @@ class SessionOut(BaseModel):
     briefing: Briefing
     materials: list[Material]
     messages: list[ChatMessageOut]
+    speech_engine: SpeechEngine = "browser"
 
 
 class HealthOut(BaseModel):
@@ -155,6 +166,7 @@ class HealthOut(BaseModel):
     chat_model: str
     briefing_model: str
     credentials_configured: bool
+    speech_engine: SpeechEngine = "browser"
 
 
 class ExtractedDocument(BaseModel):

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { Preferences } from '../lib/preferences'
-import { getRecognitionConstructor, speechSynthesisAvailable } from '../speech/webSpeech'
+import { canTranscribe } from '../meeting/useMeeting'
+import { speechSynthesisAvailable } from '../speech/webSpeech'
 import type { SessionOut } from '../types'
 import { Avatar } from './Avatar'
 import { BackIcon, EyeIcon, SpeakerIcon } from './icons'
@@ -35,7 +36,7 @@ export function BriefingScreen({ session, preferences, onPreferences, onJoin, on
   const voices = useVoices(preferences.lang)
   const voice = voices.find((v) => v.voiceURI === preferences.voiceURI) ?? voices[0]
 
-  const canListen = getRecognitionConstructor() !== null
+  const canListen = canTranscribe(session.speech_engine)
   const canSpeak = speechSynthesisAvailable()
   const secure = typeof window === 'undefined' || window.isSecureContext
 

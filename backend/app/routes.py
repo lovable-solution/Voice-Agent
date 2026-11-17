@@ -9,7 +9,8 @@ from .config import Settings
 from .documents import DocumentError, extract_text
 from .llm import LLM, LLMError
 from .prompts import BRIEFING_SYSTEM, build_briefing_prompt, build_meeting_system_prompt, default_title
-from .schemas import MAX_MATERIAL_CHARS, ExtractedDocument, HealthOut, Material, SessionCreate, SessionOut
+from .schemas import MAX_MATERIAL_CHARS, ExtractedDocument, HealthOut, Material, SessionCreate, SessionOut, SpeechEngine
+from .speech import CLOSE_ENDED, SpeechToText, speech_keyterms
 from .store import Session, SessionStore, new_id, utcnow
 
 router = APIRouter(prefix="/api")
@@ -27,6 +28,11 @@ def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
+def get_speech_engine(request: Request) -> SpeechEngine:
+    speech: SpeechToText | None = request.app.state.speech
+    return "deepgram" if speech is not None else "browser"
+
+
 def _get_session_or_404(store: SessionStore, session_id: str) -> Session:
     session = store.get(session_id)
     if session is None:
@@ -35,11 +41,16 @@ def _get_session_or_404(store: SessionStore, session_id: str) -> Session:
 
 
 @router.get("/health", response_model=HealthOut)
-async def health(llm: LLM = Depends(get_llm), settings: Settings = Depends(get_app_settings)) -> HealthOut:
+async def health(
+    llm: LLM = Depends(get_llm),
+    settings: Settings = Depends(get_app_settings),
+    speech_engine: SpeechEngine = Depends(get_speech_engine),
+) -> HealthOut:
     return HealthOut(
         chat_model=settings.chat_model,
         briefing_model=settings.briefing_model,
         credentials_configured=bool(getattr(llm, "credentials_configured", True)),
+        speech_engine=speech_engine,
     )
 
 
@@ -48,6 +59,7 @@ async def create_session(
     body: SessionCreate,
     store: SessionStore = Depends(get_store),
     llm: LLM = Depends(get_llm),
+    speech_engine: SpeechEngine = Depends(get_speech_engine),
 ) -> SessionOut:
     """Have the client study the material, then open a meeting session."""
     prompt = build_briefing_prompt(
@@ -83,6 +95,8 @@ async def create_session(
             user_name=body.user_name,
             user_background=body.user_background,
         ),
+        speech_engine=speech_engine,
+        speech_keyterms=speech_keyterms(briefing, body.user_name) if speech_engine == "deepgram" else [],
     )
     store.add(session)
     return session.to_out()
@@ -98,6 +112,8 @@ async def delete_session(session_id: str, store: SessionStore = Depends(get_stor
     session = _get_session_or_404(store, session_id)
     if session.connection is not None:
         await session.connection.shutdown(code=4410, reason="Meeting ended")
+    if session.speech_relay is not None:
+        await session.speech_relay.shutdown(code=CLOSE_ENDED, reason="Meeting ended")
     store.delete(session_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

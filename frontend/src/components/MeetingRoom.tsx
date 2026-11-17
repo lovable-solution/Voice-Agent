@@ -2,10 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import type { Preferences } from '../lib/preferences'
 import { formatDuration } from '../lib/transcript'
 import type { MeetingSnapshot } from '../meeting/controller'
-import { useMeeting } from '../meeting/useMeeting'
+import { canTranscribe, useMeeting } from '../meeting/useMeeting'
 import { MicLevelMeter } from '../speech/micLevel'
-import { getRecognitionConstructor } from '../speech/webSpeech'
-import type { SessionOut } from '../types'
+import type { SessionOut, SpeechEngine } from '../types'
 import { Avatar } from './Avatar'
 import { Captions } from './Captions'
 import { CaptionsIcon, CloseIcon, LeaveIcon, ListIcon, MicIcon, MicOffIcon, PaperclipIcon, SlidersIcon, StopIcon } from './icons'
@@ -23,10 +22,10 @@ interface MeetingRoomProps {
   onStartOver(): void
 }
 
-function useMicMeter(enabled: boolean): MicLevelMeter | null {
+function useMicMeter(enabled: boolean, engine: SpeechEngine): MicLevelMeter | null {
   const [meter, setMeter] = useState<MicLevelMeter | null>(null)
   useEffect(() => {
-    if (getRecognitionConstructor() === null) return
+    if (!canTranscribe(engine)) return
     const instance = new MicLevelMeter()
     let cancelled = false
     void instance.start().then((access) => {
@@ -36,7 +35,7 @@ function useMicMeter(enabled: boolean): MicLevelMeter | null {
       cancelled = true
       instance.stop()
     }
-  }, [])
+  }, [engine])
   useEffect(() => meter?.setPaused(!enabled), [meter, enabled])
   return meter
 }
@@ -66,7 +65,7 @@ export function MeetingRoom({ session, preferences, onPreferences, onEnded, onSt
   const [panelOpen, setPanelOpen] = useState(() => window.matchMedia?.('(min-width: 1100px)').matches ?? true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [touch] = useState(() => window.matchMedia?.('(pointer: coarse)').matches ?? false)
-  const meter = useMicMeter(snapshot?.micOn ?? false)
+  const meter = useMicMeter(snapshot?.micOn ?? false, session.speech_engine)
   const youTile = useRef<HTMLDivElement>(null)
 
   // Apply preference changes to the running meeting.

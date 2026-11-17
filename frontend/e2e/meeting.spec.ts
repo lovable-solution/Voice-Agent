@@ -15,6 +15,7 @@ type SpeechWindow = {
     hear(text: string, isFinal: boolean): void
     wordMs: number
     spoken: string[]
+    finalOnStop: string | null
   }
 }
 
@@ -163,6 +164,25 @@ test('with headphones mode on, speaking over the client interrupts them', async 
   await say(page, 'Sorry to jump in quickly')
   await expect(page.locator('.transcript__list .tag--warn', { hasText: 'interrupted' })).toBeVisible()
   await expect(page.locator('.transcript__list')).toContainText('Sorry to jump in quickly')
+})
+
+test('a turn that ends on an unfinished guess is sent with the final words', async ({ page, request }) => {
+  const sessionId = await prepareMeeting(page)
+  await page.getByRole('button', { name: 'Join the meeting' }).click()
+  await expect(page.locator('.status-line')).toHaveText('Your turn. Go ahead and speak.')
+  await waitUntilListening(page)
+
+  // Recognition's final result corrects its guess, but only arrives once it is asked to finalize.
+  await page.evaluate(() => ((window as unknown as SpeechWindow).__speech.finalOnStop = 'We could start in March.'))
+  await hear(page, 'we could start in much', false)
+
+  const yours = page.locator('.transcript__list .transcript__entry--you').last()
+  await expect(yours).toContainText('We could start in March.')
+  await expect(yours).not.toHaveClass(/is-pending/) // the server saved it
+  const stored = (await (await request.get(`/api/sessions/${sessionId}`)).json()) as {
+    messages: { role: string; kind: string; content: string }[]
+  }
+  expect(stored.messages.filter((m) => m.kind === 'speech').at(-1)?.content).toBe('We could start in March.')
 })
 
 test('muting the microphone and the keyboard shortcut', async ({ page }) => {

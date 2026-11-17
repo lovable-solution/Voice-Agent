@@ -3,6 +3,8 @@
 export type MaterialKind = 'job_posting' | 'partnership' | 'notes'
 export type Personality = 'friendly' | 'neutral' | 'skeptical' | 'demanding'
 export type MessageKind = 'speech' | 'typed' | 'event' | 'material' | 'reply'
+/** Who transcribes the participant: Deepgram (through the server) or the browser itself. */
+export type SpeechEngine = 'deepgram' | 'browser'
 
 export const MAX_MATERIAL_CHARS = 60_000
 export const MAX_UTTERANCE_CHARS = 4_000
@@ -48,6 +50,7 @@ export interface Briefing {
   questions_to_ask: string[]
   agenda: string[]
   opening_line: string
+  speech_keyterms: string[]
 }
 
 export interface ChatMessage {
@@ -68,6 +71,7 @@ export interface SessionOut {
   briefing: Briefing
   materials: Material[]
   messages: ChatMessage[]
+  speech_engine: SpeechEngine
 }
 
 export interface SessionCreate {
@@ -83,6 +87,7 @@ export interface Health {
   chat_model: string
   briefing_model: string
   credentials_configured: boolean
+  speech_engine: SpeechEngine
 }
 
 export interface ExtractedDocument {

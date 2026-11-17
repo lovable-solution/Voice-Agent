@@ -5,6 +5,8 @@
  *   window.__speech.spoken      every sentence the client's voice spoke
  *   window.__speech.listening   whether recognition is running
  *   window.__speech.wordMs      how long the fake voice takes per word
+ *   window.__speech.finalOnStop the final text recognition returns when stopped mid-guess
+ *                               (like Chrome, stop() finalizes pending words; abort() drops them)
  */
 export function installFakeSpeech(): void {
   interface FakeUtterance {
@@ -23,6 +25,7 @@ export function installFakeSpeech(): void {
     spoken: [] as string[],
     listening: false,
     wordMs: 60,
+    finalOnStop: null as string | null,
     current: null as FakeRecognition | null,
     say: async (_text: string) => {},
     hear: (_text: string, _isFinal: boolean) => {},
@@ -39,6 +42,8 @@ export function installFakeSpeech(): void {
     onerror: ((e: { error: string }) => void) | null = null
     onresult: ((e: unknown) => void) | null = null
     active = false
+    /** The latest interim guess not yet followed by a final result. */
+    pending: string | null = null
 
     start() {
       if (this.active) throw new DOMException('already started', 'InvalidStateError')
@@ -48,9 +53,20 @@ export function installFakeSpeech(): void {
       setTimeout(() => this.onstart?.(), 5)
     }
     stop() {
-      this.end()
+      const pending = this.pending
+      if (!this.active || pending === null) {
+        this.end()
+        return
+      }
+      // Like Chrome: deliver a final result for the pending words (a moment later), then end.
+      this.pending = null
+      setTimeout(() => {
+        this.emit(state.finalOnStop ?? pending, true)
+        this.end()
+      }, 20)
     }
     abort() {
+      this.pending = null
       this.end()
     }
     end() {
@@ -63,6 +79,7 @@ export function installFakeSpeech(): void {
       setTimeout(() => this.onend?.(), 5)
     }
     emit(text: string, isFinal: boolean) {
+      this.pending = isFinal ? null : text
       const result = Object.assign([{ transcript: text, confidence: 0.92 }], { isFinal })
       this.onresult?.({ resultIndex: 0, results: [result] })
     }

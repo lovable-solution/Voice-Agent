@@ -20,6 +20,7 @@ def test_health_reports_models_and_credentials(client: TestClient) -> None:
         "chat_model": "claude-opus-5-5",
         "briefing_model": "claude-opus-5-5",
         "credentials_configured": True,
+        "speech_engine": "browser",  # no Deepgram key: the browser transcribes
     }
 
 

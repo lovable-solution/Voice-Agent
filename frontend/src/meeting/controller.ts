@@ -106,11 +106,19 @@ interface Reply {
 
 export const DEFAULT_OPTIONS: MeetingOptions = { endOfTurnMs: 1200, bargeIn: false }
 
+/**
+ * After the end-of-turn pause, how long to wait for the recognizer's final result when the
+ * last words are still an interim guess. Past this, the turn is sent as it stands.
+ */
+export const FINAL_RESULT_WAIT_MS = 1500
+
 const RECOGNIZER_ERRORS: Record<RecognizerError, string> = {
   'not-allowed': 'Microphone access is blocked. Allow it in your browser’s site settings, or type your replies.',
   'audio-capture': 'No microphone was found. Connect one, or type your replies.',
   network: 'Speech recognition can’t reach its service (Chrome needs an internet connection for it). You can type your replies.',
   'language-not-supported': 'Speech recognition doesn’t support the selected language in this browser.',
+  service: 'Speech recognition is having trouble. You can type your replies.',
+  unavailable: 'Speech recognition isn’t available. You can type your replies.',
 }
 
 const defaultTimers: Timers = {
@@ -132,6 +140,8 @@ export class MeetingController {
   /** Turns sent that the server hasn't acknowledged; replies starting before the ack are stale. */
   private unackedTurns = 0
   private utterance = { final: '', interim: '' }
+  /** The pause ended the turn before its last words were final; waiting for the final result. */
+  private awaitingFinal = false
   private silenceTimer: unknown = null
   private captionTimer: unknown = null
   private shareQueue: MaterialIn[] = []
@@ -179,9 +189,11 @@ export class MeetingController {
     })
     deps.recognizer.setEvents({
       onResult: (finalText, interimText) => this.handleRecognition(finalText, interimText),
-      onError: (error) => this.handleRecognizerError(error),
+      onTurnEnd: (text) => this.handleTurnEnd(text),
+      onError: (error, detail) => this.handleRecognizerError(error, detail),
       onListeningChange: (listening) => this.set({ listening }),
     })
+    deps.recognizer.setEndOfTurnMs(this.options.endOfTurnMs)
   }
 
   // ------------------------------------------------------------------ store API (useSyncExternalStore)
@@ -199,6 +211,7 @@ export class MeetingController {
     if (this.joined || this.disposed) return
     this.joined = true
     this.deps.transport.connect()
+    this.deps.recognizer.prepare() // e.g. connect to the speech service while the client opens
   }
 
   /** Stop the client mid-sentence. Returns false if they weren't talking. */
@@ -249,7 +262,9 @@ export class MeetingController {
   }
 
   updateOptions(options: Partial<MeetingOptions>): void {
+    const pauseChanged = options.endOfTurnMs !== undefined && options.endOfTurnMs !== this.options.endOfTurnMs
     Object.assign(this.options, options)
+    if (pauseChanged && !this.disposed) this.deps.recognizer.setEndOfTurnMs(this.options.endOfTurnMs)
     if (!this.state.micOn || this.state.phase === 'ended') return
     const clientTurn = this.reply !== null || this.awaitingReply
     if (clientTurn && !this.options.bargeIn) this.deps.recognizer.stop()
@@ -496,8 +511,7 @@ export class MeetingController {
     if ((this.reply !== null || this.awaitingReply) && !this.options.bargeIn) return
     if (this.reply) {
       // Barge-in: a couple of words from the participant interrupts the client.
-      const words = joinSpoken(this.utterance.final, heard).split(/\s+/).filter(Boolean).length
-      if (words < 2) {
+      if (wordCount(joinSpoken(this.utterance.final, heard)) < 2) {
         if (finalText) this.utterance.final = joinSpoken(this.utterance.final, finalText)
         return
       }
@@ -507,17 +521,60 @@ export class MeetingController {
     if (finalText) this.utterance.final = joinSpoken(this.utterance.final, finalText)
     this.utterance.interim = interimText
     const text = joinSpoken(this.utterance.final, this.utterance.interim)
+    const turnDetecting = this.deps.recognizer.detectsTurnEnd
     this.clearTimer('captionTimer')
     this.set({
       // While a reply is still on its way (barge-in mode), the phase stays with the client.
       phase: this.awaitingReply ? this.state.phase : 'you_speaking',
-      caption: { speaker: 'you', text, spokenChars: this.utterance.final.length },
+      caption: {
+        speaker: 'you',
+        text,
+        // A turn-detecting recognizer has nothing final until the turn ends; show all but the
+        // still-settling last word as recognized.
+        spokenChars: turnDetecting ? lastWordStart(text) : this.utterance.final.length,
+      },
     })
+    if (turnDetecting) return // the recognizer reports when the turn is over
     this.clearTimer('silenceTimer')
+    if (this.awaitingFinal && !interimText) {
+      this.commitUtterance() // the final result we were waiting for
+      return
+    }
+    this.awaitingFinal = false // still talking: the pause starts over
+    this.silenceTimer = this.timers.setTimeout(() => this.endOfTurn(), this.options.endOfTurnMs)
+  }
+
+  /** The participant paused long enough to end their turn. */
+  private endOfTurn(): void {
+    this.silenceTimer = null
+    if (!this.utterance.interim) {
+      this.commitUtterance()
+      return
+    }
+    // The last words are still the recognizer's interim guess. Its final result is usually more
+    // accurate and can lag behind (it comes from a network service), and stopping recognition
+    // now would discard it. Ask for it and wait briefly.
+    this.awaitingFinal = true
+    this.deps.recognizer.finalize()
     this.silenceTimer = this.timers.setTimeout(() => {
       this.silenceTimer = null
       this.commitUtterance()
-    }, this.options.endOfTurnMs)
+    }, FINAL_RESULT_WAIT_MS)
+  }
+
+  /** A turn-detecting recognizer says the participant has finished: `text` is their whole turn. */
+  private handleTurnEnd(raw: string): void {
+    if (this.disposed || this.state.phase === 'ended' || !this.state.micOn) return
+    const text = raw.trim()
+    if (!text) return
+    if ((this.reply !== null || this.awaitingReply) && !this.options.bargeIn) return
+    if (this.reply) {
+      // Headphones mode, said over the client: a lone "mm-hm" is a backchannel, not an interruption.
+      if (wordCount(text) < 2) return
+      this.cutReply()
+    }
+    this.utterance = { final: text, interim: '' }
+    this.commitUtterance()
   }
 
   private commitUtterance(): void {
@@ -529,12 +586,15 @@ export class MeetingController {
 
   private clearUtterance(): void {
     this.clearTimer('silenceTimer')
+    this.awaitingFinal = false
     this.utterance = { final: '', interim: '' }
   }
 
-  private handleRecognizerError(error: RecognizerError): void {
-    const message = RECOGNIZER_ERRORS[error]
-    if (error === 'not-allowed' || error === 'audio-capture') {
+  private handleRecognizerError(error: RecognizerError, detail?: string): void {
+    const message = detail || RECOGNIZER_ERRORS[error]
+    if (error === 'not-allowed' || error === 'audio-capture' || error === 'unavailable') {
+      // Speaking can't work for the rest of the meeting: switch to typing.
+      if (this.utterance.final || this.utterance.interim) this.commitUtterance()
       this.set({ micBlocked: message, micOn: false, listening: false })
       return
     }
@@ -624,7 +684,7 @@ export class MeetingController {
     this.disposed = true
     this.clearTimer('silenceTimer')
     this.clearTimer('captionTimer')
-    this.deps.recognizer.stop()
+    this.deps.recognizer.dispose()
     this.deps.synthesizer.cancel()
     this.deps.transport.close()
   }
@@ -633,6 +693,15 @@ export class MeetingController {
     this.state = { ...this.state, ...patch }
     for (const listener of this.listeners) listener()
   }
+}
+
+function wordCount(text: string): number {
+  return text.split(/\s+/).filter(Boolean).length
+}
+
+/** Where the last word of `text` starts (0 for a single word). */
+function lastWordStart(text: string): number {
+  return text.trimEnd().lastIndexOf(' ') + 1
 }
 
 /** Rebuild the visible transcript from the server's history (when rejoining). */

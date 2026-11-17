@@ -13,10 +13,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
-from .schemas import Briefing, ChatMessageOut, Material, MessageKind, Personality, SessionOut
+from .schemas import Briefing, ChatMessageOut, Material, MessageKind, Personality, SessionOut, SpeechEngine
 
 if TYPE_CHECKING:
     from .realtime import MeetingConnection
+    from .speech import SpeechRelay
 
 
 def new_id(prefix: str) -> str:
@@ -62,6 +63,10 @@ class Session:
     messages: list[ChatMessage] = field(default_factory=list)
     last_active: float = field(default_factory=time.monotonic)
     connection: MeetingConnection | None = None
+    speech_engine: SpeechEngine = "browser"
+    # Words the speech recognizer should favour (names, products, technical terms).
+    speech_keyterms: list[str] = field(default_factory=list)
+    speech_relay: SpeechRelay | None = None
 
     @property
     def started(self) -> bool:
@@ -79,6 +84,7 @@ class Session:
             briefing=self.briefing,
             materials=self.materials,
             messages=[m.to_out() for m in self.messages],
+            speech_engine=self.speech_engine,
         )
 
 

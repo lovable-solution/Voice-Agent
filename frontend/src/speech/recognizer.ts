@@ -1,25 +1,63 @@
 import { getRecognitionConstructor, type SpeechRecognitionConstructor, type SpeechRecognitionLike } from './webSpeech'
 
-export type RecognizerError = 'not-allowed' | 'audio-capture' | 'network' | 'language-not-supported'
+/**
+ * `service`: transient trouble with the recognition service (it keeps trying).
+ * `unavailable`: recognition can't work in this meeting (for example, the service rejected its key).
+ */
+export type RecognizerError =
+  | 'not-allowed'
+  | 'audio-capture'
+  | 'network'
+  | 'language-not-supported'
+  | 'service'
+  | 'unavailable'
 
 export interface RecognizerEvents {
   /** `finalText` is newly finalized speech in this event; `interimText` is the current guess for the rest. */
   onResult(finalText: string, interimText: string): void
-  onError(error: RecognizerError): void
+  /**
+   * The participant finished their turn, and `text` is all of it. Only recognizers that
+   * detect the end of a turn themselves (`detectsTurnEnd`) call this.
+   */
+  onTurnEnd(text: string): void
+  /** `detail`, when given, is a more specific message to show than the default for `error`. */
+  onError(error: RecognizerError, detail?: string): void
   onListeningChange(listening: boolean): void
 }
 
 export interface Recognizer {
   readonly supported: boolean
+  /**
+   * The recognizer decides when the participant has finished a turn and reports it with
+   * `onTurnEnd`; the app's own pause timer isn't used.
+   */
+  readonly detectsTurnEnd: boolean
   lang: string
   setEvents(events: RecognizerEvents): void
+  /** Get ready to listen (open the microphone and connections) without listening yet. */
+  prepare(): void
   /** Listen continuously until `stop()`, restarting after the browser's own timeouts. */
   start(): void
   /** Stop and discard anything not yet delivered. */
   stop(): void
+  /**
+   * Ask for the final result of the speech heard so far (it arrives through `onResult`).
+   * Listening carries on afterwards.
+   */
+  finalize(): void
+  /** The "pause that ends your turn" setting; recognizers that detect turn ends tune themselves with it. */
+  setEndOfTurnMs(ms: number): void
+  /** Release everything: the meeting is over. */
+  dispose(): void
 }
 
-const noop: RecognizerEvents = { onResult() {}, onError() {}, onListeningChange() {} }
+export const noopRecognizerEvents: RecognizerEvents = {
+  onResult() {},
+  onTurnEnd() {},
+  onError() {},
+  onListeningChange() {},
+}
+const noop = noopRecognizerEvents
 
 /**
  * Wraps the browser's SpeechRecognition. Chrome ends a "continuous" session on its own
@@ -29,6 +67,7 @@ const noop: RecognizerEvents = { onResult() {}, onError() {}, onListeningChange(
 export class BrowserRecognizer implements Recognizer {
   lang = 'en-US'
   readonly supported: boolean
+  readonly detectsTurnEnd = false
   private readonly ctor: SpeechRecognitionConstructor | null
   private events: RecognizerEvents = noop
   private active: SpeechRecognitionLike | null = null
@@ -45,10 +84,22 @@ export class BrowserRecognizer implements Recognizer {
     this.events = events
   }
 
+  prepare(): void {
+    // Nothing to set up ahead of time.
+  }
+
   start(): void {
     if (!this.ctor) return
     this.wanted = true
     this.launch()
+  }
+
+  setEndOfTurnMs(): void {
+    // The app's pause timer ends turns; nothing to tune here.
+  }
+
+  dispose(): void {
+    this.stop()
   }
 
   stop(): void {
@@ -65,6 +116,16 @@ export class BrowserRecognizer implements Recognizer {
       // already stopped
     }
     this.events.onListeningChange(false)
+  }
+
+  finalize(): void {
+    // stop(), unlike abort(), makes the service return a final result for the audio it already
+    // has. `onend` follows, and the session restarts because we still want to listen.
+    try {
+      this.active?.stop()
+    } catch {
+      // not started yet
+    }
   }
 
   private launch(): void {

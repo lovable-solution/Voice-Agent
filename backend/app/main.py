@@ -11,15 +11,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from . import realtime, routes
+from . import realtime, routes, speech
 from .config import Settings, get_settings
 from .llm import LLM, AnthropicLLM
+from .speech import DeepgramFlux, SpeechToText
 from .store import SessionStore
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 
-def create_app(settings: Settings | None = None, llm: LLM | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    llm: LLM | None = None,
+    speech_to_text: SpeechToText | None = None,
+) -> FastAPI:
+    """`speech_to_text` defaults to Deepgram when DEEPGRAM_API_KEY is set (else the browser transcribes)."""
     settings = settings or get_settings()
 
     app = FastAPI(
@@ -33,6 +39,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         max_sessions=settings.max_sessions,
     )
     app.state.llm = llm or AnthropicLLM(settings)
+    if speech_to_text is None and settings.deepgram_api_key:
+        speech_to_text = DeepgramFlux(settings)
+    app.state.speech = speech_to_text
 
     app.add_middleware(
         CORSMiddleware,
@@ -42,6 +51,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     )
     app.include_router(routes.router)
     app.include_router(realtime.router)
+    app.include_router(speech.router)
 
     # In production the built React app is served from the same origin as the API.
     dist = settings.frontend_dist
